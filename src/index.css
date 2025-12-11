@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: theme('colors.pandora-text');
+  background-color: theme('colors.pandora-bg');
+  font-family: theme('fontFamily.sans');
+}
+
+body {
+  min-height: 100vh;
+  background-color: theme('colors.pandora-bg');
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

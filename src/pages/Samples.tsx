@@ -5,7 +5,7 @@ import { db } from '../lib/firebase';
 import { useStore } from '../store/useStore';
 import { cn } from '../utils/cn';
 import { useAuthStore } from '../store/useAuth';
-import { toggleLike, addComment } from '../lib/social';
+import { toggleLike, addComment, toggleCommentLike } from '../lib/social';
 
 type Sample = {
   id: string;
@@ -35,6 +35,8 @@ export default function Samples() {
   const [commentList, setCommentList] = useState<Record<string, Comment[]>>({});
   const [commentText, setCommentText] = useState<Record<string, string>>({});
   const [muted, setMuted] = useState(true);
+  const [commentLikes, setCommentLikes] = useState<Record<string, { count: number; liked: boolean }>>({});
+  const [profiles, setProfiles] = useState<Record<string, { displayName?: string; email?: string | null }>>({});
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -60,9 +62,41 @@ export default function Samples() {
         ...prev,
         [commentOpenId]: snap.docs.map((d) => ({ id: d.id, ...(d.data() as Comment) })),
       }));
+      setCommentLikes((prev) => {
+        const next = { ...prev };
+        snap.docs.forEach((d) => {
+          const data = d.data() as any;
+          const existing = prev[d.id];
+          next[d.id] = { count: data.likes || 0, liked: existing?.liked || false };
+          if (user && existing?.liked === undefined) {
+            const likeDoc = doc(db, 'transmissions', commentOpenId, 'comments', d.id, 'likes', user.uid);
+            getDoc(likeDoc)
+              .then((likeSnap) => {
+                setCommentLikes((inner) => ({
+                  ...inner,
+                  [d.id]: { count: data.likes || 0, liked: likeSnap.exists() },
+                }));
+              })
+              .catch(() => undefined);
+          }
+        });
+        return next;
+      });
     });
     return () => unsub();
-  }, [commentOpenId]);
+  }, [commentOpenId, user]);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'profiles'), (snap) => {
+      const map: Record<string, { displayName?: string; email?: string | null }> = {};
+      snap.docs.forEach((d) => {
+        const data = d.data() as any;
+        map[data.uid] = { displayName: data.displayName, email: data.email };
+      });
+      setProfiles(map);
+    });
+    return () => unsub();
+  }, []);
 
   const handleComment = async (id: string) => {
     if (!user) return;
@@ -74,6 +108,17 @@ export default function Samples() {
       await addComment(id, user.uid, text);
     } catch {
       setComments((prev) => ({ ...prev, [id]: Math.max(0, (prev[id] || 1) - 1) }));
+    }
+  };
+
+  const handleCommentLike = async (transmissionId: string, commentId: string) => {
+    if (!user) return;
+    const current = commentLikes[commentId] || { count: 0, liked: false };
+    setCommentLikes((prev) => ({ ...prev, [commentId]: { count: current.count + (current.liked ? -1 : 1), liked: !current.liked } }));
+    try {
+      await toggleCommentLike(transmissionId, commentId, user.uid);
+    } catch {
+      setCommentLikes((prev) => ({ ...prev, [commentId]: current }));
     }
   };
 
@@ -279,13 +324,24 @@ export default function Samples() {
                 c.createdAt && 'seconds' in c.createdAt
                   ? new Date(c.createdAt.seconds * 1000).toLocaleTimeString()
                   : 'Just now';
+              const name = isBlind ? 'Subject-****' : profiles[c.uid || '']?.displayName || profiles[c.uid || '']?.email || 'User';
+              const stats = commentLikes[c.id] || { count: (c as any).likes || 0, liked: false };
               return (
                 <div key={c.id} className="border border-pandora-border rounded-2xl p-2 bg-pandora-bg">
                   <div className="flex items-center justify-between text-[11px] text-pandora-muted">
-                    <span className="truncate">{isBlind ? 'Subject-****' : c.uid || 'Unknown'}</span>
+                    <span className="truncate">{name}</span>
                     <span>{time}</span>
                   </div>
                   <p className="text-sm text-pandora-text whitespace-pre-line">{c.text}</p>
+                  <button
+                    onClick={() => handleCommentLike(commentOpenId, c.id)}
+                    className={cn(
+                      'mt-2 text-[11px] uppercase flex items-center gap-1',
+                      stats.liked ? 'text-pandora-neon' : 'text-pandora-muted hover:text-pandora-text',
+                    )}
+                  >
+                    <Activity size={12} /> {stats.count} Likes
+                  </button>
                 </div>
               );
             })}

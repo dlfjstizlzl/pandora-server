@@ -41,6 +41,7 @@ export function Layout() {
   const [pendingSample, setPendingSample] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [uiConfig, setUiConfig] = useState<{ primaryButtonLabel?: string; tickerMessage?: string } | null>(null);
   const [localeMenuOpen, setLocaleMenuOpen] = useState(false);
   const [showProfilePanel, setShowProfilePanel] = useState(true);
@@ -53,6 +54,11 @@ export function Layout() {
   const [dragOffset, setDragOffset] = useState(0); // 0 = closed, 1 = fully open
   const [draggingProfile, setDraggingProfile] = useState(false);
   const [profileDragOffset, setProfileDragOffset] = useState(0); // 0 = closed, 1 = open
+
+  useEffect(() => {
+    document.body.classList.add('no-screenshot');
+    return () => document.body.classList.remove('no-screenshot');
+  }, []);
 
   useEffect(() => {
     const trigger = draft.toLowerCase().includes('#order');
@@ -133,7 +139,15 @@ export function Layout() {
     return url;
   };
 
+  const isAllowedMedia = (file: File) => {
+    const type = file.type || '';
+    return type.startsWith('image/') || type.startsWith('video/') || type.startsWith('audio/');
+  };
+
   const handleAttachmentUpload = async (file: File) => {
+    if (!isAllowedMedia(file)) {
+      throw new Error('Only images, videos, or audio files are allowed.');
+    }
     const url = await uploadFile(file, 'attachments');
     setAttachments((prev) => [...prev, { url, name: file.name, contentType: file.type }]);
     return url;
@@ -149,11 +163,16 @@ export function Layout() {
 
     setSubmitting(true);
     setSubmitError(null);
+    setAttachmentError(null);
     try {
       // Upload any pending files first so post + files go together
       let attachmentsForPost = [...attachments];
       if (activeTab === 'TEXT' && pendingAttachments.length) {
         for (const file of pendingAttachments) {
+          if (!isAllowedMedia(file)) {
+            setAttachmentError('Only images, videos, or audio files are allowed.');
+            throw new Error('Unsupported attachment type.');
+          }
           const url = await uploadFile(file, 'attachments');
           attachmentsForPost.push({ url, name: file.name, contentType: file.type });
         }
@@ -778,14 +797,20 @@ export function Layout() {
                     <p className="text-xs text-pandora-muted">Attach photos, videos, or files (optional).</p>
                   <UploadZone
                     label="Attach files"
-                    description="Images, videos, docs, pdf up to your limit"
-                    accept="image/*,video/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.zip"
+                    description="Images, videos, or audio only"
+                    accept="image/*,video/*,audio/*"
                     onUpload={handleAttachmentUpload}
                     deferUpload
                     multiple
                     onFilesSelected={(files) => {
                       if (!files.length) return;
-                      setPendingAttachments((prev) => [...prev, ...files]);
+                      const accepted = files.filter(isAllowedMedia);
+                      if (accepted.length !== files.length) {
+                        setAttachmentError('Only images, videos, or audio files are allowed.');
+                      }
+                      if (accepted.length) {
+                        setPendingAttachments((prev) => [...prev, ...accepted]);
+                      }
                     }}
                   />
                   {attachments.length > 0 && (
@@ -821,6 +846,7 @@ export function Layout() {
                       </div>
                     </div>
                   )}
+                  {attachmentError && <p className="text-xs text-pandora-pink">{attachmentError}</p>}
                 </div>
                 <div
                   className={cn(

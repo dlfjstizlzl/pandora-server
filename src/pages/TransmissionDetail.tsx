@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { doc, onSnapshot, collection, orderBy, query } from 'firebase/firestore';
+import { doc, onSnapshot, collection, orderBy, query, getDoc } from 'firebase/firestore';
 import { Loader2, Activity, MessageSquare, Play, Volume2, VolumeX } from 'lucide-react';
 import { db } from '../lib/firebase';
-import { toggleLike, addComment } from '../lib/social';
+import { toggleLike, addComment, toggleCommentLike } from '../lib/social';
 import { useAuthStore } from '../store/useAuth';
 import { useStore } from '../store/useStore';
 import { PandoraAvatar } from '../components/ui/PandoraAvatar';
@@ -37,6 +37,8 @@ export default function TransmissionDetail() {
   const [commentText, setCommentText] = useState('');
   const [commentList, setCommentList] = useState<Comment[]>([]);
   const [muted, setMuted] = useState(true);
+  const [commentLikes, setCommentLikes] = useState<Record<string, { count: number; liked: boolean }>>({});
+  const [profiles, setProfiles] = useState<Record<string, { displayName?: string; email?: string | null }>>({});
 
   useEffect(() => {
     if (!id) return;
@@ -58,9 +60,41 @@ export default function TransmissionDetail() {
     const q = query(collection(db, 'transmissions', id, 'comments'), orderBy('createdAt', 'desc'));
     const unsub = onSnapshot(q, (snap) => {
       setCommentList(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Comment) })));
+      setCommentLikes((prev) => {
+        const next = { ...prev };
+        snap.docs.forEach((d) => {
+          const data = d.data() as any;
+          const existing = prev[d.id];
+          next[d.id] = { count: data.likes || 0, liked: existing?.liked || false };
+          if (user && existing?.liked === undefined) {
+            const likeDoc = doc(db, 'transmissions', id, 'comments', d.id, 'likes', user.uid);
+            getDoc(likeDoc)
+              .then((likeSnap) => {
+                setCommentLikes((inner) => ({
+                  ...inner,
+                  [d.id]: { count: data.likes || 0, liked: likeSnap.exists() },
+                }));
+              })
+              .catch(() => undefined);
+          }
+        });
+        return next;
+      });
     });
     return () => unsub();
-  }, [id]);
+  }, [id, user]);
+
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'profiles'), (snap) => {
+      const map: Record<string, { displayName?: string; email?: string | null }> = {};
+      snap.docs.forEach((d) => {
+        const data = d.data() as any;
+        map[data.uid] = { displayName: data.displayName, email: data.email };
+      });
+      setProfiles(map);
+    });
+    return () => unsub();
+  }, []);
 
   const handleLike = async () => {
     if (!user || !id) return;
@@ -77,15 +111,28 @@ export default function TransmissionDetail() {
     if (!user || !id) return;
     const text = commentText.trim();
     if (!text) return;
+    const tempId = `temp-${Date.now()}`;
     setCommentText('');
     setCommentList((prev) => [
-      { id: `temp-${Date.now()}`, uid: user.uid, text, createdAt: { seconds: Date.now() / 1000, nanoseconds: 0 } as any },
+      { id: tempId, uid: user.uid, text, createdAt: { seconds: Date.now() / 1000, nanoseconds: 0 } as any },
       ...prev,
     ]);
+    setCommentLikes((prev) => ({ ...prev, [tempId]: { count: 0, liked: false } }));
     try {
       await addComment(id, user.uid, text);
     } catch {
       // ignore; realtime feed will correct
+    }
+  };
+
+  const handleCommentLike = async (commentId: string) => {
+    if (!user || !id) return;
+    const current = commentLikes[commentId] || { count: 0, liked: false };
+    setCommentLikes((prev) => ({ ...prev, [commentId]: { count: current.count + (current.liked ? -1 : 1), liked: !current.liked } }));
+    try {
+      await toggleCommentLike(id, commentId, user.uid);
+    } catch {
+      setCommentLikes((prev) => ({ ...prev, [commentId]: current }));
     }
   };
 
@@ -100,6 +147,11 @@ export default function TransmissionDetail() {
     const days = Math.floor(hrs / 24);
     return `${days}d ago`;
   };
+  const displayNameFor = (uid?: string | null) => {
+    if (!uid) return 'User';
+    const p = profiles[uid];
+    return p?.displayName || p?.email || 'User';
+  };
 
   if (loading) {
     return (
@@ -113,7 +165,7 @@ export default function TransmissionDetail() {
     return <div className="text-sm text-pandora-muted">Transmission not found.</div>;
   }
 
-  const authorName = item.uid ? (isBlind ? 'Subject-****' : item.uid) : 'Unknown';
+  const authorName = item.uid ? (isBlind ? 'Subject-****' : displayNameFor(item.uid)) : 'Unknown';
   const isSample = item.type === 'sample';
 
   return (
@@ -190,11 +242,12 @@ export default function TransmissionDetail() {
             </div>
             <div className="space-y-2 max-h-[520px] overflow-y-auto">
               {commentList.map((c) => {
-                const name = isBlind ? 'Subject-****' : c.uid || 'Unknown';
+                const name = isBlind ? 'Subject-****' : displayNameFor(c.uid);
                 const time =
                   c.createdAt && 'seconds' in c.createdAt
                     ? new Date((c.createdAt as any).seconds * 1000).toLocaleTimeString()
                     : 'Just now';
+                const stats = commentLikes[c.id] || { count: (c as any).likes || 0, liked: false };
                 return (
                   <div key={c.id} className="border border-pandora-border rounded-sm p-2 bg-pandora-bg">
                     <div className="flex items-center justify-between text-[11px] text-pandora-muted">
@@ -202,6 +255,15 @@ export default function TransmissionDetail() {
                       <span>{time}</span>
                     </div>
                     <p className="text-sm text-pandora-text whitespace-pre-line">{c.text}</p>
+                    <button
+                      onClick={() => handleCommentLike(c.id)}
+                      className={cn(
+                        'mt-2 text-[11px] uppercase flex items-center gap-1',
+                        stats.liked ? 'text-pandora-neon' : 'text-pandora-muted hover:text-pandora-text',
+                      )}
+                    >
+                      <Activity size={12} /> {stats.count} Likes
+                    </button>
                   </div>
                 );
               })}
@@ -245,11 +307,12 @@ export default function TransmissionDetail() {
             </div>
             <div className="space-y-2 max-h-64 overflow-y-auto">
               {commentList.map((c) => {
-                const name = isBlind ? 'Subject-****' : c.uid || 'Unknown';
+                const name = isBlind ? 'Subject-****' : displayNameFor(c.uid);
                 const time =
                   c.createdAt && 'seconds' in c.createdAt
                     ? new Date((c.createdAt as any).seconds * 1000).toLocaleTimeString()
                     : 'Just now';
+                const stats = commentLikes[c.id] || { count: (c as any).likes || 0, liked: false };
                 return (
                   <div key={c.id} className="border border-pandora-border rounded-sm p-2 bg-pandora-bg">
                     <div className="flex items-center justify-between text-[11px] text-pandora-muted">
@@ -257,6 +320,15 @@ export default function TransmissionDetail() {
                       <span>{time}</span>
                     </div>
                     <p className="text-sm text-pandora-text whitespace-pre-line">{c.text}</p>
+                    <button
+                      onClick={() => handleCommentLike(c.id)}
+                      className={cn(
+                        'mt-2 text-[11px] uppercase flex items-center gap-1',
+                        stats.liked ? 'text-pandora-neon' : 'text-pandora-muted hover:text-pandora-text',
+                      )}
+                    >
+                      <Activity size={12} /> {stats.count} Likes
+                    </button>
                   </div>
                 );
               })}

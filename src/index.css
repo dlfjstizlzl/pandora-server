@@ -13,6 +13,12 @@ body {
   background-color: theme('colors.pandora-bg');
 }
 
+.no-screenshot * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;

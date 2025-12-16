@@ -23,7 +23,24 @@ export async function addComment(transmissionId: string, uid: string, text: stri
   await addDoc(commentsRef, {
     uid,
     text,
+    likes: 0,
     createdAt: serverTimestamp(),
   });
   await updateDoc(docRef, { comments: increment(1) });
+}
+
+export async function toggleCommentLike(transmissionId: string, commentId: string, uid: string) {
+  const likeRef = doc(db, 'transmissions', transmissionId, 'comments', commentId, 'likes', uid);
+  const commentRef = doc(db, 'transmissions', transmissionId, 'comments', commentId);
+  const snap = await getDoc(likeRef);
+
+  if (snap.exists()) {
+    await deleteDoc(likeRef);
+    await updateDoc(commentRef, { likes: increment(-1) });
+    return { liked: false };
+  }
+
+  await setDoc(likeRef, { uid, createdAt: serverTimestamp() });
+  await updateDoc(commentRef, { likes: increment(1) });
+  return { liked: true };
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { PanelsTopLeft, Lock, ShieldCheck, AlertTriangle, PlusCircle, Image, Loader2 } from 'lucide-react';
+import { PanelsTopLeft, Lock, ShieldCheck, AlertTriangle, PlusCircle, Loader2, Send } from 'lucide-react';
 import { useStore, UserStats } from '../store/useStore';
 import { useAuthStore } from '../store/useAuth';
 import { addDoc, collection, onSnapshot, orderBy, query, serverTimestamp } from 'firebase/firestore';
@@ -23,13 +23,21 @@ type Screen = {
   createdAt?: { seconds: number; nanoseconds: number } | null;
 };
 
+type Post = {
+  id: string;
+  sectorId: string;
+  createdBy?: string;
+  content: string;
+  createdAt?: { seconds: number; nanoseconds: number } | null;
+};
+
 export default function Sectors() {
   const stats = useStore((s) => s.userStats);
   const { user } = useAuthStore();
 
   const [sectors, setSectors] = useState<Sector[]>([]);
   const [selected, setSelected] = useState<Sector | null>(null);
-  const [screens, setScreens] = useState<Screen[]>([]);
+  const [posts, setPosts] = useState<Post[]>([]);
   const [creatingSector, setCreatingSector] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
@@ -37,7 +45,8 @@ export default function Sectors() {
   const [newReqStat, setNewReqStat] = useState<keyof UserStats>('logic');
   const [newReqValue, setNewReqValue] = useState(50);
   const [savingSector, setSavingSector] = useState(false);
-  const [creatingScreen, setCreatingScreen] = useState(false);
+  const [posting, setPosting] = useState(false);
+  const [draft, setDraft] = useState('');
   const sectorChannelId = selected ? `sector-${selected.id}` : null;
 
   useEffect(() => {
@@ -57,13 +66,13 @@ export default function Sectors() {
 
   useEffect(() => {
     if (!selected) {
-      setScreens([]);
+      setPosts([]);
       return;
     }
-    const q = query(collection(db, 'sectors', selected.id, 'screens'), orderBy('createdAt', 'desc'));
+    const q = query(collection(db, 'sectors', selected.id, 'posts'), orderBy('createdAt', 'desc'));
     const unsub = onSnapshot(q, (snap) => {
-      const rows = snap.docs.map((d) => ({ id: d.id, sectorId: selected.id, ...(d.data() as Screen) }));
-      setScreens(rows);
+      const rows = snap.docs.map((d) => ({ id: d.id, sectorId: selected.id, ...(d.data() as Post) }));
+      setPosts(rows);
     });
     return () => unsub();
   }, [selected]);
@@ -72,7 +81,7 @@ export default function Sectors() {
     if (sector.type === 'CLASSIFIED' && sector.requirement) {
       const current = stats[sector.requirement.stat];
       if (current < sector.requirement.value) {
-        window.alert(`ACCESS DENIED: Need ${sector.requirement.stat.toUpperCase()} > ${sector.requirement.value}`);
+        window.alert(`입장 불가: ${sector.requirement.stat.toUpperCase()} ${sector.requirement.value}+ 필요`);
         return;
       }
     }
@@ -102,23 +111,24 @@ export default function Sectors() {
     }
   };
 
-  const handleCreateScreen = async () => {
-    if (!selected || !user) return;
-    setCreatingScreen(true);
+  const handleCreatePost = async () => {
+    if (!selected || !user || !draft.trim()) return;
+    setPosting(true);
     try {
-      await addDoc(collection(db, 'sectors', selected.id, 'screens'), {
-        title: `${selected.name} Screen ${screens.length + 1}`,
+      await addDoc(collection(db, 'sectors', selected.id, 'posts'), {
+        content: draft.trim(),
         createdBy: user.uid,
         createdAt: serverTimestamp(),
       });
+      setDraft('');
     } finally {
-      setCreatingScreen(false);
+      setPosting(false);
     }
   };
 
   const requirementText = (sector: Sector) => {
     if (!sector.requirement) return null;
-    return `Req: ${sector.requirement.stat.toUpperCase()} > ${sector.requirement.value} (yours: ${stats[sector.requirement.stat]})`;
+    return `입장 조건: ${sector.requirement.stat.toUpperCase()} ${sector.requirement.value}+ (현재 ${stats[sector.requirement.stat]})`;
   };
 
   return (
@@ -126,13 +136,13 @@ export default function Sectors() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-pandora-text">
           <PanelsTopLeft size={18} className="text-pandora-text" />
-          <h2 className="text-lg font-semibold tracking-wide">SECTORS</h2>
+          <h2 className="text-lg font-semibold tracking-wide">COMMUNITIES</h2>
         </div>
         <button
           onClick={() => setCreatingSector(true)}
           className="flex items-center gap-2 text-xs uppercase px-3 py-2 rounded-full bg-gradient-to-r from-pandora-accent-from to-pandora-accent-to text-pandora-bg shadow hover:shadow-lg transition"
         >
-          <PlusCircle size={14} /> New Sector
+          <PlusCircle size={14} /> New Community
         </button>
       </div>
 
@@ -164,7 +174,7 @@ export default function Sectors() {
                       : 'border border-pandora-pink text-pandora-pink'
                   }`}
                 >
-                  [{sector.type}]
+                  {sector.type === 'PUBLIC' ? 'Public' : 'Private'}
                 </span>
               </div>
               <div className="text-xs text-pandora-muted mt-1">{sector.description}</div>
@@ -172,52 +182,60 @@ export default function Sectors() {
             </button>
           );
         })}
-        {sectors.length === 0 && <p className="text-sm text-pandora-muted">No sectors yet. Create one to begin.</p>}
+        {sectors.length === 0 && <p className="text-sm text-pandora-muted">No communities yet. Create one to begin.</p>}
       </div>
 
       {selected && (
         <div className="border border-pandora-border bg-pandora-bg p-4 rounded-2xl space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-pandora-text">
-              <Image size={16} className="text-pandora-text" />
-              <h3 className="text-sm font-semibold uppercase">{selected.name} Gallery</h3>
+              <PanelsTopLeft size={16} className="text-pandora-text" />
+              <h3 className="text-sm font-semibold uppercase">{selected.name} 커뮤니티</h3>
             </div>
-            <button
-              onClick={handleCreateScreen}
-              disabled={creatingScreen}
-              className="text-xs uppercase px-3 py-1 rounded-full bg-gradient-to-r from-pandora-accent-from to-pandora-accent-to text-pandora-bg shadow hover:shadow-lg transition disabled:opacity-50"
-            >
-              {creatingScreen ? 'Creating...' : 'Create Screen'}
-            </button>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {screens.map((screen) => {
+          <p className="text-xs text-pandora-muted">{selected.description}</p>
+
+          <div className="space-y-2">
+            <div className="text-[11px] uppercase text-pandora-muted font-semibold">새 글 올리기</div>
+            <div className="flex items-end gap-2">
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="커뮤니티에 남길 메시지를 입력하세요"
+                className="flex-1 h-20 bg-pandora-surface/80 border border-pandora-border text-pandora-text text-sm p-3 rounded-2xl font-mono placeholder:text-pandora-muted focus:outline-none focus:border-pandora-accent-to"
+              />
+              <button
+                onClick={handleCreatePost}
+                disabled={!draft.trim() || posting}
+                className="h-20 w-12 rounded-2xl border border-white/15 bg-gradient-to-r from-pandora-accent-from to-pandora-accent-to text-pandora-bg flex items-center justify-center hover:shadow-lg transition disabled:opacity-50"
+              >
+                {posting ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-[11px] uppercase text-pandora-muted font-semibold">최근 글</div>
+            {posts.map((post) => {
               const created =
-                screen.createdAt && 'seconds' in screen.createdAt
-                  ? new Date(screen.createdAt.seconds * 1000).toLocaleString()
+                post.createdAt && 'seconds' in post.createdAt
+                  ? new Date(post.createdAt.seconds * 1000).toLocaleString()
                   : 'Just now';
               return (
-                <div key={screen.id} className="border border-pandora-border bg-pandora-surface p-3 rounded-2xl space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-semibold text-pandora-text truncate">{screen.title}</div>
-                    <span className="text-[11px] text-pandora-muted uppercase">Screen</span>
+                <div key={post.id} className="border border-pandora-border bg-pandora-surface/80 p-3 rounded-2xl space-y-1">
+                  <div className="flex items-center justify-between text-[11px] text-pandora-muted">
+                    <span>{created}</span>
                   </div>
-                  <div className="text-xs text-pandora-muted">Created: {created}</div>
-                  <div className="h-32 border border-dashed border-pandora-border bg-pandora-bg flex items-center justify-center text-xs text-pandora-muted">
-                    Visuals reserved
-                  </div>
+                  <p className="text-sm text-pandora-text whitespace-pre-line">{post.content}</p>
                 </div>
               );
             })}
-            {screens.length === 0 && (
-              <div className="text-sm text-pandora-muted border border-pandora-border bg-pandora-surface p-4 rounded-2xl">
-                No screens yet. Create one to start the gallery.
-              </div>
-            )}
+            {posts.length === 0 && <p className="text-sm text-pandora-muted">아직 글이 없습니다.</p>}
           </div>
+
           {sectorChannelId && (
             <div className="mt-3">
-              <ChatRoom channelId={sectorChannelId} type={1} title={`${selected.name} Chat`} subtitle="Sector room" />
+              <ChatRoom channelId={sectorChannelId} type={1} title={`${selected.name} Chat`} subtitle="커뮤니티 채팅" />
             </div>
           )}
         </div>
@@ -227,7 +245,7 @@ export default function Sectors() {
         <div className="fixed inset-0 z-40 bg-black/70 flex items-center justify-center">
           <div className="w-full max-w-md border border-white/15 bg-pandora-surface/95 p-5 rounded-2xl space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold uppercase text-pandora-text">Create Sector</h3>
+              <h3 className="text-sm font-semibold uppercase text-pandora-text">Create Community</h3>
               <button onClick={() => setCreatingSector(false)} className="text-pandora-muted hover:text-pandora-text text-lg">
                 ✕
               </button>
@@ -239,7 +257,7 @@ export default function Sectors() {
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                   className="w-full bg-pandora-bg border border-pandora-border text-pandora-text text-sm p-3 rounded-2xl font-mono placeholder:text-pandora-muted focus:outline-none focus:border-pandora-accent-to"
-                  placeholder="Sector name"
+                  placeholder="Community name"
                 />
               </div>
               <div className="space-y-1">

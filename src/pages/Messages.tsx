@@ -279,19 +279,44 @@ export default function Messages() {
   // Conversation list from contacts/links (Nakama-only messaging, Firestore for profiles)
   useEffect(() => {
     if (!user) return;
-    const base = linkedOnly ? contacts.filter((c) => links.includes(c.uid)) : contacts.filter((c) => c.uid !== user.uid);
-    const mapped: Conversation[] = base.map((c) => {
-      const cached = loadCachedMessages(user.uid, c.uid);
-      const last = cached[cached.length - 1];
-      return {
-        id: conversationKey(user.uid, c.uid),
-        otherUid: c.uid,
-        lastText: last?.text,
-        lastAt: messageTimeMs(last),
-      };
-    }).sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+    const partnerIds = new Set<string>();
+    const prefix = `pandora_dm_cache_${user.uid}_`;
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(prefix)) {
+        const otherUid = key.slice(prefix.length);
+        if (otherUid) partnerIds.add(otherUid);
+      }
+    }
+    Object.keys(lastSeen).forEach((k) => partnerIds.add(k));
+    if (selected) partnerIds.add(selected);
+
+    const contactMap = new Map(contacts.map((c) => [c.uid, c]));
+    const baseProfiles: Profile[] = [];
+    partnerIds.forEach((uid) => {
+      if (uid === user.uid) return;
+      const profile = contactMap.get(uid);
+      if (profile && (!linkedOnly || links.includes(uid))) {
+        baseProfiles.push(profile);
+      } else if (!profile && !linkedOnly) {
+        baseProfiles.push({ uid, displayName: uid });
+      }
+    });
+
+    const mapped: Conversation[] = baseProfiles
+      .map((c) => {
+        const cached = loadCachedMessages(user.uid, c.uid);
+        const last = cached[cached.length - 1];
+        return {
+          id: conversationKey(user.uid, c.uid),
+          otherUid: c.uid,
+          lastText: last?.text,
+          lastAt: messageTimeMs(last),
+        };
+      })
+      .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
     setConversations(mapped);
-  }, [contacts, links, linkedOnly, user]);
+  }, [contacts, links, linkedOnly, selected, lastSeen, user]);
 
   // Background-join conversations for realtime list updates (limited to first 10)
   useEffect(() => {
@@ -481,16 +506,27 @@ export default function Messages() {
       if (!otherUid) return;
       const createdMs = msg.create_time ? Date.parse(msg.create_time) : Date.now();
       setConversations((prev) => {
-        const next = prev.map((c) =>
-          c.otherUid === otherUid
-            ? {
-                ...c,
+        const existing = prev.find((c) => c.otherUid === otherUid);
+        const updated = existing
+          ? prev.map((c) =>
+              c.otherUid === otherUid
+                ? {
+                    ...c,
+                    lastText: text,
+                    lastAt: createdMs,
+                  }
+                : c,
+            )
+          : [
+              ...prev,
+              {
+                id: conversationKey(user.uid, otherUid),
+                otherUid,
                 lastText: text,
                 lastAt: createdMs,
-              }
-            : c,
-        );
-        return [...next].sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+              },
+            ];
+        return [...updated].sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
       });
       if (selected !== otherUid) {
         const sender = msg.sender_id === user.uid ? 'You' : otherUid;

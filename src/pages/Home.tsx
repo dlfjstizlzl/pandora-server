@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Activity, Loader2, Play, TerminalSquare, MessageSquare, Volume2, VolumeX } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
+import { collection, doc, getDoc, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { PandoraAvatar } from '../components/ui/PandoraAvatar';
 import { cn } from '../utils/cn';
 import { useStore } from '../store/useStore';
 import { useAuthStore } from '../store/useAuth';
-import { addComment, toggleLike } from '../lib/social';
+import { addComment, toggleCommentLike, toggleLike } from '../lib/social';
 import { useT } from '../lib/i18n';
 
 type Transmission = {
@@ -39,6 +39,9 @@ export default function Home() {
   const [commentOpenId, setCommentOpenId] = useState<string | null>(null);
   const [commentText, setCommentText] = useState<Record<string, string>>({});
   const [commentList, setCommentList] = useState<Record<string, any[]>>({});
+  const [commentLikes, setCommentLikes] = useState<Record<string, { count: number; liked: boolean }>>({});
+  const [zoomedImage, setZoomedImage] = useState<string | null>(null);
+  const [zoomLevel, setZoomLevel] = useState(1);
   const t = useT();
 
   useEffect(() => {
@@ -100,6 +103,11 @@ export default function Home() {
     const days = Math.floor(hrs / 24);
     return `${days}d ago`;
   };
+  const displayNameFor = (uid?: string | null) => {
+    if (!uid) return 'User';
+    const p = profiles[uid];
+    return p?.displayName || p?.email || 'User';
+  };
 
   const handleLike = async (id: string) => {
     if (!user) return;
@@ -120,19 +128,44 @@ export default function Home() {
         ...prev,
         [commentOpenId]: snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })),
       }));
+      setCommentLikes((prev) => {
+        const next = { ...prev };
+        snap.docs.forEach((d) => {
+          const data = d.data() as any;
+          const existing = prev[d.id];
+          next[d.id] = {
+            count: data.likes || 0,
+            liked: existing?.liked || false,
+          };
+          if (user && existing?.liked === undefined) {
+            const likeDoc = doc(db, 'transmissions', commentOpenId, 'comments', d.id, 'likes', user.uid);
+            getDoc(likeDoc)
+              .then((likeSnap) => {
+                setCommentLikes((inner) => ({
+                  ...inner,
+                  [d.id]: { count: data.likes || 0, liked: likeSnap.exists() },
+                }));
+              })
+              .catch(() => undefined);
+          }
+        });
+        return next;
+      });
     });
     return () => unsub();
-  }, [commentOpenId]);
+  }, [commentOpenId, user]);
 
   const handleComment = async (id: string) => {
     if (!user) return;
     const text = (commentText[id] || '').trim();
     if (!text) return;
+    const tempId = `temp-${Date.now()}`;
     setCommentText((prev) => ({ ...prev, [id]: '' }));
     setCommentList((prev) => ({
       ...prev,
-      [id]: [{ id: `temp-${Date.now()}`, uid: user.uid, text, createdAt: { seconds: Date.now() / 1000, nanoseconds: 0 } }, ...(prev[id] || [])],
+      [id]: [{ id: tempId, uid: user.uid, text, createdAt: { seconds: Date.now() / 1000, nanoseconds: 0 } }, ...(prev[id] || [])],
     }));
+    setCommentLikes((prev) => ({ ...prev, [tempId]: { count: 0, liked: false } }));
     setComments((prev) => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
     try {
       await addComment(id, user.uid, text);
@@ -141,8 +174,56 @@ export default function Home() {
     }
   };
 
+  const handleCommentLike = async (transmissionId: string, commentId: string) => {
+    if (!user) return;
+    const current = commentLikes[commentId] || { count: 0, liked: false };
+    setCommentLikes((prev) => ({ ...prev, [commentId]: { count: current.count + (current.liked ? -1 : 1), liked: !current.liked } }));
+    try {
+      await toggleCommentLike(transmissionId, commentId, user.uid);
+    } catch {
+      setCommentLikes((prev) => ({ ...prev, [commentId]: current }));
+    }
+  };
+
   return (
     <div className="space-y-6">
+      {zoomedImage && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-4">
+          <div className="flex items-center gap-2 self-end mb-2">
+            <button
+              onClick={() => setZoomLevel((z) => Math.max(0.5, z - 0.25))}
+              className="px-3 py-1 text-xs rounded-full border border-white/20 text-white hover:border-white/60"
+            >
+              -
+            </button>
+            <span className="text-white text-xs px-2">{Math.round(zoomLevel * 100)}%</span>
+            <button
+              onClick={() => setZoomLevel((z) => Math.min(3, z + 0.25))}
+              className="px-3 py-1 text-xs rounded-full border border-white/20 text-white hover:border-white/60"
+            >
+              +
+            </button>
+            <button
+              onClick={() => {
+                setZoomLevel(1);
+                setZoomedImage(null);
+              }}
+              className="px-3 py-1 text-xs rounded-full border border-white/30 text-white hover:border-white/60"
+            >
+              Close
+            </button>
+          </div>
+          <div className="max-w-6xl w-full flex-1 flex items-center justify-center">
+            <img
+              src={zoomedImage}
+              alt="zoomed"
+              className="max-h-[90vh] max-w-full object-contain transition-transform duration-150"
+              style={{ transform: `scale(${zoomLevel})` }}
+              onDoubleClick={() => setZoomLevel(1)}
+            />
+          </div>
+        </div>
+      )}
       <header className="sticky top-0 z-10 h-12 bg-pandora-surface/85 border-b border-pandora-border/70 overflow-hidden hidden lg:block backdrop-blur-md px-4">
         <div className="flex items-center gap-4 text-[11px] uppercase h-full">
           <span className="text-[10px] font-bold text-pandora-neon">{t('banner.feedLive')}</span>
@@ -169,7 +250,7 @@ export default function Home() {
       <div className="space-y-4">
         {feed.map((item) => {
           const author = item.uid ? profiles[item.uid] : undefined;
-          const display = author?.displayName || author?.email || item.uid;
+          const display = author?.displayName || author?.email || 'User';
           return (
             <article key={item.id} className="space-y-3 border border-pandora-border p-4 bg-pandora-surface rounded-none">
               <div className="flex items-center gap-3">
@@ -189,37 +270,59 @@ export default function Home() {
 
               {item.type === 'text' && item.content && <p className="text-sm text-pandora-text whitespace-pre-line">{item.content}</p>}
               {item.type === 'text' && item.attachments && item.attachments.length > 0 && (
-                <div className="space-y-2">
-                  {item.attachments.map((att) => {
-                    const isImage = att.contentType?.startsWith('image');
-                    const isVideo = att.contentType?.startsWith('video');
-                    if (isImage) {
-                      return (
-                        <div key={att.url} className="border border-pandora-border rounded-2xl overflow-hidden bg-black/40">
-                          <img src={att.url} alt={att.name} className="w-full max-h-[360px] object-contain bg-black" />
-                        </div>
-                      );
-                    }
-                    if (isVideo) {
-                      return (
-                        <div key={att.url} className="border border-pandora-border rounded-2xl overflow-hidden bg-black/40">
-                          <video src={att.url} controls className="w-full max-h-[360px] bg-black" />
-                        </div>
-                      );
-                    }
-                    return (
-                      <a
-                        key={att.url}
-                        href={att.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="flex items-center justify-between text-xs text-pandora-text border border-pandora-border px-3 py-2 rounded-2xl hover:border-pandora-accent-to hover:text-pandora-text"
-                      >
-                        <span className="truncate">{att.name}</span>
-                        <span className="text-pandora-muted text-[11px]">Open</span>
-                      </a>
-                    );
-                  })}
+                <div className="space-y-3">
+                  <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1">
+                    {item.attachments.map((att) => {
+                      const isImage = att.contentType?.startsWith('image');
+                      const isVideo = att.contentType?.startsWith('video');
+                      if (isImage) {
+                        return (
+                          <button
+                            type="button"
+                            key={att.url}
+                            onClick={() => {
+                              setZoomedImage(att.url);
+                              setZoomLevel(1);
+                            }}
+                            className="min-w-[220px] max-w-[80vw] h-[260px] snap-center border border-pandora-border rounded-2xl overflow-hidden bg-black/60 flex items-center justify-center hover:border-pandora-accent-to transition shrink-0"
+                          >
+                            <img
+                              src={att.url}
+                              alt={att.name}
+                              className="w-full h-full object-contain transition-transform duration-200 hover:scale-105"
+                            />
+                          </button>
+                        );
+                      }
+                      if (isVideo) {
+                        return (
+                          <div
+                            key={att.url}
+                            className="min-w-[240px] max-w-[80vw] h-[260px] snap-center border border-pandora-border rounded-2xl overflow-hidden bg-black/60 flex items-center justify-center shrink-0"
+                          >
+                            <video src={att.url} controls className="w-full h-full object-contain bg-black" />
+                          </div>
+                        );
+                      }
+                      return null;
+                    })}
+                  </div>
+                  <div className="space-y-1">
+                    {item.attachments
+                      .filter((att) => !att.contentType?.startsWith('image') && !att.contentType?.startsWith('video'))
+                      .map((att) => (
+                        <a
+                          key={att.url}
+                          href={att.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex items-center justify-between text-xs text-pandora-text border border-pandora-border px-3 py-2 rounded-2xl hover:border-pandora-accent-to hover:text-pandora-text"
+                        >
+                          <span className="truncate">{att.name}</span>
+                          <span className="text-pandora-muted text-[11px]">Open</span>
+                        </a>
+                      ))}
+                  </div>
                 </div>
               )}
 
@@ -292,21 +395,31 @@ export default function Home() {
                   </div>
                   <div className="space-y-2 max-h-56 overflow-y-auto">
                     {(commentList[item.id] || []).map((c) => {
-                      const name = isBlind ? 'Subject-****' : c.uid || 'Unknown';
+                      const name = isBlind ? 'Subject-****' : displayNameFor(c.uid);
                       const time =
                         c.createdAt && 'seconds' in c.createdAt
                           ? new Date((c.createdAt as any).seconds * 1000).toLocaleTimeString()
                           : 'Just now';
-                      return (
-                        <div key={c.id} className="border border-pandora-border/60 bg-pandora-bg/60 rounded-2xl p-2">
-                          <div className="flex items-center justify-between text-[11px] text-pandora-muted">
-                            <span className="truncate">{name}</span>
-                            <span>{time}</span>
-                          </div>
-                          <p className="text-sm text-pandora-text whitespace-pre-line">{c.text}</p>
+                    const stats = commentLikes[c.id] || { count: c.likes || 0, liked: false };
+                    return (
+                      <div key={c.id} className="border border-pandora-border/60 bg-pandora-bg/60 rounded-2xl p-2">
+                        <div className="flex items-center justify-between text-[11px] text-pandora-muted">
+                          <span className="truncate">{name}</span>
+                          <span>{time}</span>
                         </div>
-                      );
-                    })}
+                        <p className="text-sm text-pandora-text whitespace-pre-line">{c.text}</p>
+                        <button
+                          onClick={() => handleCommentLike(item.id, c.id)}
+                          className={cn(
+                            'mt-2 text-[11px] uppercase flex items-center gap-1',
+                            stats.liked ? 'text-pandora-neon' : 'text-pandora-muted hover:text-pandora-text',
+                          )}
+                        >
+                          <Activity size={12} /> {stats.count} Likes
+                        </button>
+                      </div>
+                    );
+                  })}
                     {(commentList[item.id] || []).length === 0 && (
                       <p className="text-xs text-pandora-muted">No comments yet.</p>
                     )}

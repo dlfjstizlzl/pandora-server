@@ -10,6 +10,9 @@
     "lint": "echo \"add your linter\""
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.948.0",
+    "@heroiclabs/nakama-js": "^2.8.0",
+    "firebase": "^12.6.0",
     "lucide-react": "^0.322.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

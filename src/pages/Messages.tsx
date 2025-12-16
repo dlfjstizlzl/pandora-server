@@ -6,7 +6,7 @@ import { useAuthStore } from '../store/useAuth';
 import { getOrCreateProfile } from '../lib/profile';
 import { fetchLinks } from '../lib/links';
 import { useNavigate, useParams } from 'react-router-dom';
-import { getNakamaConnection, joinDMChannel, resetNakamaConnection, subscribeChannelMessages } from '../lib/nakama';
+import { getNakamaConnection, joinDMChannel, resetNakamaConnection, subscribeChannelMessages, connectSocket } from '../lib/nakama';
 import { useToastStore } from '../store/useToast';
 import type { ChannelMessage } from '@heroiclabs/nakama-js';
 import { PandoraAvatar } from '../components/ui/PandoraAvatar';
@@ -18,6 +18,7 @@ type Message = {
   toUid?: string | null;
   conversationId?: string;
   createdAt?: { seconds: number; nanoseconds: number } | null;
+  createdAtMs?: number;
 };
 
 type Profile = {
@@ -40,8 +41,12 @@ type LastSeenMap = Record<string, number>;
 const cacheKeyFor = (currentUid: string, otherUid: string) => `pandora_dm_cache_${currentUid}_${otherUid}`;
 
 const messageTimeMs = (msg?: Message) => {
-  if (!msg?.createdAt || typeof msg.createdAt.seconds !== 'number') return 0;
-  return msg.createdAt.seconds * 1000 + (msg.createdAt.nanoseconds || 0) / 1e6;
+  if (!msg) return 0;
+  if (typeof msg.createdAtMs === 'number' && !Number.isNaN(msg.createdAtMs)) return msg.createdAtMs;
+  if (msg.createdAt && typeof msg.createdAt.seconds === 'number') {
+    return msg.createdAt.seconds * 1000 + (msg.createdAt.nanoseconds || 0) / 1e6;
+  }
+  return 0;
 };
 
 const loadCachedMessages = (currentUid?: string | null, otherUid?: string | null): Message[] => {
@@ -51,7 +56,13 @@ const loadCachedMessages = (currentUid?: string | null, otherUid?: string | null
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed as Message[];
+    return (parsed as Message[]).map((m) => {
+      const ts = messageTimeMs(m);
+      return {
+        ...m,
+        createdAtMs: ts,
+      };
+    });
   } catch {
     return [];
   }
@@ -61,6 +72,25 @@ const persistMessages = (currentUid?: string | null, otherUid?: string | null, l
   if (!currentUid || !otherUid) return;
   const capped = list.slice(-200); // keep last 200 locally
   localStorage.setItem(cacheKeyFor(currentUid, otherUid), JSON.stringify(capped));
+};
+
+const channelMessageToMessage = (m: ChannelMessage): Message => {
+  const content = m.content as any;
+  const createdMs =
+    typeof m.create_time === 'string'
+      ? Date.parse(m.create_time) || Date.now()
+      : Date.now();
+  return {
+    id: m.message_id,
+    text: typeof content?.text === 'string' ? content.text : '',
+    fromUid: content?.fromUid || m.sender_id,
+    toUid: content?.toUid || content?.targetUid || null,
+    createdAt: {
+      seconds: Math.floor(createdMs / 1000),
+      nanoseconds: Math.floor((createdMs % 1000) * 1e6),
+    },
+    createdAtMs: createdMs,
+  };
 };
 
 export default function Messages() {
@@ -92,10 +122,22 @@ export default function Messages() {
   const channelIdToOtherRef = useRef<Map<string, string>>(new Map());
   const otherUidToChannelRef = useRef<Map<string, string>>(new Map());
   const backgroundJoinsRef = useRef<Map<string, { channelId: string; leave: () => void }>>(new Map());
-  const formatTime = (ts?: { seconds: number; nanoseconds?: number } | null) => {
-    if (!ts || typeof ts.seconds !== 'number') return '';
-    const ms = ts.seconds * 1000 + (ts.nanoseconds || 0) / 1e6;
+  const refreshedConversationsRef = useRef<boolean>(false);
+  const formatTime = (msg?: Message | null) => {
+    const ms = msg ? messageTimeMs(msg) : 0;
+    if (!ms) return '';
     return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+  const isSocketReady = () => {
+    const adapter = (socketRef.current as any)?.adapter;
+    if (adapter && typeof adapter.isOpen === 'function') {
+      try {
+        return Boolean(adapter.isOpen());
+      } catch {
+        return false;
+      }
+    }
+    return Boolean(socketRef.current);
   };
 
   useEffect(() => {
@@ -174,15 +216,7 @@ export default function Messages() {
         channelIdToOtherRef.current.set(cid, selected);
         otherUidToChannelRef.current.set(selected, cid);
 
-        const merged = history.map((m) => {
-          const content = m.content as any;
-          return {
-            id: m.message_id,
-            text: typeof content?.text === 'string' ? content.text : '',
-            fromUid: content?.fromUid || m.sender_id,
-            createdAt: { seconds: m.create_time.seconds, nanoseconds: m.create_time.nanos } as any,
-          };
-        });
+        const merged = history.map((m) => channelMessageToMessage(m));
 
         const dedup = new Map<string, Message>();
         [...cached, ...merged].forEach((m) => {
@@ -199,16 +233,10 @@ export default function Messages() {
         const incomingId = m.message_id;
         if (messageIdsRef.current.has(incomingId)) return;
 
-        const content = m.content as any;
-        const incoming = {
-          id: incomingId,
-          text: typeof content?.text === 'string' ? content.text : '',
-          fromUid: content?.fromUid || m.sender_id,
-          createdAt: { seconds: m.create_time.seconds, nanoseconds: m.create_time.nanos } as any,
-        };
+        const incoming = channelMessageToMessage(m);
 
         // 추가 중복 방지: 같은 보낸이/같은 텍스트가 1초 내 두 번 오면 스킵
-        const nowTs = incoming.createdAt?.seconds ? incoming.createdAt.seconds * 1000 + (incoming.createdAt.nanoseconds || 0) / 1e6 : Date.now();
+        const nowTs = messageTimeMs(incoming) || Date.now();
         const last = lastIncomingRef.current;
         if (last && last.fromUid === incoming.fromUid && last.text === incoming.text && Math.abs(nowTs - last.ts) < 1000) {
           return;
@@ -226,9 +254,8 @@ export default function Messages() {
         unsubMsg = subscribeChannelMessages(handler);
         unsub = () => {
           unsubMsg?.();
-          socket.leaveChat(cid);
-          channelIdToOtherRef.current.delete(cid);
-          otherUidToChannelRef.current.delete(selected);
+          // Keep channel membership to continue receiving messages globally; just drop listener
+          // socket.leaveChat(cid);
         };
       })
       .catch((err) => {
@@ -242,6 +269,12 @@ export default function Messages() {
       socketRef.current = null;
     };
   }, [user, selected, reconnectKey]);
+
+  // Reset composer when switching threads
+  useEffect(() => {
+    setText('');
+    setSendError(null);
+  }, [selected]);
 
   // Conversation list from contacts/links (Nakama-only messaging, Firestore for profiles)
   useEffect(() => {
@@ -293,17 +326,72 @@ export default function Messages() {
       });
     };
     joinAll();
+  }, [conversations, user]);
+
+  // On entering Messages, refresh last message snapshots by fetching recent history (for conversations not already mapped)
+  useEffect(() => {
+    if (!user || refreshedConversationsRef.current || conversations.length === 0) return;
+    let cancelled = false;
+    const refresh = async () => {
+      for (const conv of conversations.slice(0, 10)) {
+        if (otherUidToChannelRef.current.has(conv.otherUid)) continue;
+        try {
+          const { channelId, messages, socket } = await joinDMChannel(user.uid, conv.otherUid);
+          if (cancelled) {
+            socket.leaveChat(channelId);
+            continue;
+          }
+          const latest = messages[messages.length - 1];
+          if (latest) {
+            const content = latest.content as any;
+            const text = typeof content?.text === 'string' ? content.text : '';
+            const createdMs = latest.create_time ? Date.parse(latest.create_time) : Date.now();
+            setConversations((prev) => {
+              const next = prev.map((c) =>
+                c.otherUid === conv.otherUid
+                  ? { ...c, lastText: text, lastAt: createdMs }
+                  : c,
+              );
+              return [...next].sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+            });
+          }
+          socket.leaveChat(channelId);
+        } catch {
+          // ignore failures
+        }
+      }
+      refreshedConversationsRef.current = true;
+    };
+    refresh();
     return () => {
-      // On unmount, leave all background channels
-      backgroundJoinsRef.current.forEach((entry) => entry.leave());
-      backgroundJoinsRef.current.clear();
-      channelIdToOtherRef.current.clear();
-      otherUidToChannelRef.current.clear();
+      cancelled = true;
     };
   }, [conversations, user]);
 
+  // Ensure socket is connected when Messages mounts (safety for reloads)
+  useEffect(() => {
+    if (!user) return;
+    connectSocket(user.uid).catch(() => undefined);
+  }, [user]);
+
+  // 간헐적 연결 체크: 소켓이 조용히 끊어지면 자동 재조인
+  useEffect(() => {
+    if (!user || !selected) return;
+    const id = window.setInterval(() => {
+      if (!isSocketReady()) {
+        setReconnectKey((k) => k + 1);
+      }
+    }, 10000);
+    return () => window.clearInterval(id);
+  }, [user, selected]);
+
   const send = async () => {
     if (!text.trim() || !user || !selected || sending) return;
+    if (!channelId || !socketRef.current || !isSocketReady()) {
+      setSendError('Chat is reconnecting. Please try again in a moment.');
+      setReconnectKey((k) => k + 1);
+      return;
+    }
     setSending(true);
     setSendError(null);
     
@@ -321,14 +409,14 @@ export default function Messages() {
       id: localId,
       text: messageText,
       fromUid: user.uid,
-      createdAt: { seconds: Math.floor(Date.now() / 1000), nanoseconds: 0 },
+      createdAt: { seconds: Math.floor(now / 1000), nanoseconds: Math.floor((now % 1000) * 1e6) },
+      createdAtMs: now,
     };
     setMessages((prev) => {
       const next = [...prev, optimistic].sort((a, b) => messageTimeMs(a) - messageTimeMs(b));
       messageIdsRef.current.add(localId);
       return next;
     });
-    setText('');
 
     try {
       if (!channelId || !socketRef.current) {
@@ -338,16 +426,19 @@ export default function Messages() {
       // 🔑 핵심: content에 실제 Firebase UID를 포함
       await socketRef.current.writeChatMessage(channelId, { 
         text: messageText,
-        fromUid: user.uid  // 커스텀 필드로 실제 UID 전송
+        fromUid: user.uid,  // 커스텀 필드로 실제 UID 전송
+        toUid: selected,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to send message.';
       setSendError(message);
+      setReconnectKey((k) => k + 1);
       // rollback optimistic message on failure
       setMessages((prev) => prev.filter((m) => m.id !== localId));
       messageIdsRef.current.delete(localId);
     } finally {
       setSending(false);
+      setText('');
     }
   };
 
@@ -368,10 +459,7 @@ export default function Messages() {
           ? {
               ...c,
               lastText: last.text,
-              lastAt:
-                last.createdAt && 'seconds' in last.createdAt
-                  ? last.createdAt.seconds * 1000 + (last.createdAt.nanoseconds || 0) / 1e6
-                  : Date.now(),
+              lastAt: messageTimeMs(last) || Date.now(),
             }
           : c,
       );
@@ -383,10 +471,14 @@ export default function Messages() {
   useEffect(() => {
     if (!user) return;
     const unsub = subscribeChannelMessages((msg) => {
-      const otherUid = channelIdToOtherRef.current.get(msg.channel_id);
-      if (!otherUid) return;
       const content = msg.content as any;
       const text = typeof content?.text === 'string' ? content.text : '';
+      const fromUid = content?.fromUid || msg.sender_id;
+      const toUid = content?.toUid || content?.targetUid || '';
+      const otherUid =
+        channelIdToOtherRef.current.get(msg.channel_id) ||
+        (fromUid === user.uid ? toUid : fromUid);
+      if (!otherUid) return;
       const createdMs = msg.create_time ? Date.parse(msg.create_time) : Date.now();
       setConversations((prev) => {
         const next = prev.map((c) =>
@@ -533,14 +625,13 @@ export default function Messages() {
               {messages.map((msg) => {
                 const mine = msg.fromUid === user?.uid;
                 const isPending = msg.id.startsWith('local-');
-                const created = formatTime(msg.createdAt);
+                const created = formatTime(msg);
                 const isRead =
                   mine &&
                   selected &&
                   lastSeen[selected] &&
-                  msg.createdAt &&
-                  'seconds' in msg.createdAt &&
-                  lastSeen[selected]! >= msg.createdAt.seconds * 1000 + (msg.createdAt.nanoseconds || 0) / 1e6;
+                  messageTimeMs(msg) > 0 &&
+                  lastSeen[selected]! >= messageTimeMs(msg);
                 return (
                   <div key={msg.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
                     <div

@@ -42,6 +42,7 @@ export default function Home() {
   const [commentLikes, setCommentLikes] = useState<Record<string, { count: number; liked: boolean }>>({});
   const [zoomedImage, setZoomedImage] = useState<string | null>(null);
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [showBanner, setShowBanner] = useState(true);
   const t = useT();
 
   useEffect(() => {
@@ -187,6 +188,28 @@ export default function Home() {
 
   return (
     <div className="space-y-6">
+      {showBanner && (
+        <div className="border border-pandora-border bg-gradient-to-r from-pandora-accent-from/15 via-pandora-bg to-pandora-accent-to/15 rounded-2xl p-3 flex items-start gap-3">
+          <div className="w-8 h-8 rounded-full bg-pandora-accent-to/30 border border-white/20 flex items-center justify-center text-pandora-bg font-bold text-[11px]">
+            LIVE
+          </div>
+          <div className="flex-1 space-y-1">
+            <div className="text-xs uppercase text-pandora-muted font-semibold flex items-center gap-2">
+              <span className="text-pandora-neon">{t('banner.feedLive')}</span>
+              <span className="text-[#FF6B6B]">{t('banner.authRequired')}</span>
+            </div>
+            <p className="text-sm text-pandora-text">{t('banner.default')}</p>
+          </div>
+          <button
+            onClick={() => setShowBanner(false)}
+            className="text-pandora-muted hover:text-pandora-text text-sm px-2"
+            aria-label="Hide banner"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {zoomedImage && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-4">
           <div className="flex items-center gap-2 self-end mb-2">
